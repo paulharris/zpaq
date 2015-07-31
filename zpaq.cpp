@@ -3452,7 +3452,7 @@ ThreadReturn decompressThread(void* arg) {
         for (unsigned k=b.start; k<ptr[j]; ++k)
           q+=job.jd.ht[k].usize;
         assert(q>=0);
-        assert(q<=out.size()-job.jd.ht[ptr[j]].usize);
+        assert(static_cast<uint64_t>(q)<=out.size()-job.jd.ht[ptr[j]].usize);
 
         // Write the fragment and any consecutive fragments that follow
         assert(offset>=0);
@@ -3464,7 +3464,8 @@ ThreadReturn decompressThread(void* arg) {
           assert(p->second.data<=size(ptr));
           usize+=job.jd.ht[ptr[++j]].usize;
         }
-        assert(q+usize<=out.size());
+        assert(usize>=0);
+        assert(static_cast<uint64_t>(q+usize)<=out.size());
         int nz=q;  // first nonzero byte in fragments to be written
         while (nz<q+usize && out.c_str()[nz]==0) ++nz;
         if (!job.jd.dotest && nz<q+usize) {  // not all zero bytes?

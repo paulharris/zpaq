@@ -684,7 +684,7 @@ void stretchKey(char* out, const char* in, const char* salt) {
 void random(char* buf, int n) {
 #ifdef unix
   FILE* in=fopen("/dev/urandom", "rb");
-  if (in && fread(buf, 1, n, in)==n)
+  if (in && static_cast<int>(fread(buf, 1, n, in))==n)
     fclose(in);
   else {
     error("key generation failed");
