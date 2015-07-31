@@ -1478,21 +1478,47 @@ class CompressJob;
 // Do everything
 class Jidac {
 public:
-  int doCommand(int argc, const char** argv);
+  // functions for library-usage
+  // procedure:
+  // Jidac jidac;
+  // jidac.options = set various options;
+  // jidac.prepare( CMD_list ); // eg for list
+  // jidac.add(); OR jidac.list(); OR jidac.extract();
+  // Note: you can't call list() and then add(), because
+  // it will load the archives differently depending on the action.
+  // But, you could call list() multiple times... I THINK?
+  // Need to confirm to finish this interface design.
+
+  Jidac();
+
+  enum Command { CMD_NONE, CMD_Add, CMD_List, CMD_Extract };
+  void prepare( Command cmd );
+
+  // Commands
+  int add();                // add, return 1 if error else 0
+  int extract();            // extract, return 1 if error else 0
+  int list( vector<DTMap::iterator> * out_filelist = NULL );               // list, return 1 if compare = finds a mismatch
+
+private:
+  // functions for standard command line usage
   friend ThreadReturn decompressThread(void* arg);
   friend ThreadReturn testThread(void* arg);
   friend struct ExtractJob;
-private:
 
-  // Command line arguments
-  string command;           // "-add", "-extract", "-list"
+  Command command;
+
+public: // CONTROL OPTIONS
   string archive;           // archive name
   vector<string> files;     // filename args
   int all;                  // -all option
   bool force;               // -force option
   int fragment;             // -fragment option
+private:
   char password_string[32]; // hash of -key argument
   const char* password;     // points to password_string or NULL
+public:
+  void set_password_plain( string const& pass ); // this will hash it
+  void set_password_hash( const char* hash_32 );  // must be 32 bytes
   bool last;                // -last option
   string method;            // default "1"
   bool noattributes;        // -noattributes option
@@ -1507,6 +1533,7 @@ private:
   int64_t date;             // now as decimal YYYYMMDDHHMMSS (UT)
   int64_t version;          // version number or 14 digit date
 
+private:
   // Archive state
   int64_t dhsize;           // total size of D blocks according to H blocks
   int64_t dcsize;           // total size of D blocks according to C blocks
@@ -1516,12 +1543,8 @@ private:
   vector<Block> block;      // list of data blocks to extract
   vector<VER> ver;          // version info
 
-  // Commands
-  int add();                // add, return 1 if error else 0
-  int extract();            // extract, return 1 if error else 0
-  int list();               // list, return 1 if compare = finds a mismatch
-  int test();               // test, return 1 if error else 0
-  void usage();             // help
+private:
+  // WHAT IS THIS FUNCTION? int test();               // test, return 1 if error else 0
 
   // Support functions
   string rename(string name);           // rename from -to
@@ -1535,8 +1558,32 @@ private:
              // compare file contents with p
 };
 
+
+void Jidac::set_password_plain( string const& pass ) {
+  libzpaq::SHA256 sha256;
+  for (int i=0, end=size(pass); i<end; ++i) {
+    sha256.put(pass[i]);
+  }
+  // this step not need, just pass the sha result directly
+  // char hash[32];
+  // memcpy(hash, sha256.result(), 32);
+  set_password_hash(sha256.result());
+}
+
+
+// must be 32 byte string buffer
+void Jidac::set_password_hash( const char* hash_32 ) {
+  if (hash_32 == NULL) {
+    password= NULL;
+  }
+  else {
+    memcpy(password_string, hash_32, 32);
+    password=password_string;
+  }
+}
+
 // Print help message
-void Jidac::usage() {
+void usage( Jidac const& jidac ) {
   printf(
 "zpaq archiver for incremental backups with rollback capability.\n"
 "http://mattmahoney.net/zpaq\n"
@@ -1593,7 +1640,7 @@ void Jidac::usage() {
 "  -force          Compare file contents instead of dates (slower).\n"
 "  -not =[+-#?^]   Exclude by comparison result.\n"
 "  -summary [N]    Show N largest files/dirs only (default: 20).\n",
-  threads, dateToString(date).c_str());
+  jidac.threads, dateToString(jidac.date).c_str());
   exit(1);
 }
 
@@ -1659,11 +1706,12 @@ string expandOption(const char* opt) {
   return result;
 }
 
-// Parse the command line. Return 1 if error else 0.
-int Jidac::doCommand(int argc, const char** argv) {
+
+// constructor, when not using copy-constructor
+Jidac::Jidac() {
 
   // Initialize options to default values
-  command="";
+  command=CMD_NONE;
   force=false;
   fragment=6;
   all=0;
@@ -1683,123 +1731,33 @@ int Jidac::doCommand(int argc, const char** argv) {
   ver.resize(1); // version 0
   dhsize=dcsize=0;
 
-  // Get date
+  // Init date from 'now'
+  // note: this used to check if now==-1, now it just checks 'date' (later)
+  // I am not sure if this change is be a problem...
   time_t now=time(NULL);
-  tm* t=gmtime(&now);
-  date=(t->tm_year+1900)*10000000000LL+(t->tm_mon+1)*100000000LL
-      +t->tm_mday*1000000+t->tm_hour*10000+t->tm_min*100+t->tm_sec;
+  tm t;
+  gmtime_r(&now, &t); // gmtime_r is threadsafe, better for use as a library
+  date = (t.tm_year+1900)*10000000000LL+(t.tm_mon+1)*100000000LL
+      +t.tm_mday*1000000+t.tm_hour*10000+t.tm_min*100+t.tm_sec;
+}
 
-  // Get optional options
-  for (int i=1; i<argc; ++i) {
-    const string opt=expandOption(argv[i]);  // read command
-    if ((opt=="-add" || opt=="-extract" || opt=="-list")
-        && i<argc-1 && argv[i+1][0]!='-' && command=="") {
-      command=opt;
-      archive=argv[++i];  // append ".zpaq" to archive if no extension
-      const char* slash=strrchr(argv[i], '/');
-      const char* dot=strrchr(slash ? slash : argv[i], '.');
-      if (!dot && archive!="") archive+=".zpaq";
-      while (++i<argc && argv[i][0]!='-')  // read filename args
-        files.push_back(argv[i]);
-      --i;
-    }
-    else if (opt=="-all") {
-      all=4;
-      if (i<argc-1 && isdigit(argv[i+1][0])) all=atoi(argv[++i]);
-    }
-    else if (opt=="-detailed") summary=-1;
-    else if (opt=="-force") force=true;
-    else if (opt=="-fragment" && i<argc-1) fragment=atoi(argv[++i]);
-    else if (opt=="-key") {
-      if (read_password(password_string, 2-exists(archive, 1),
-          argc, argv, i))
-        password=password_string;
-    }
-    else if (opt=="-method" && i<argc-1) method=argv[++i];
-    else if (opt=="-noattributes") noattributes=true;
-    else if (opt=="-nodelete") nodelete=true;
-    else if (opt=="-not") {  // read notfiles
-      while (++i<argc && argv[i][0]!='-') {
-        if (argv[i][0]=='=') nottype=argv[i];
-        else notfiles.push_back(argv[i]);
-      }
-      --i;
-    }
-    else if (opt=="-only") {  // read onlyfiles
-      while (++i<argc && argv[i][0]!='-')
-        onlyfiles.push_back(argv[i]);
-      --i;
-    }
-    else if (opt=="-summary") {
-      summary=20;
-      if (i<argc-1 && isdigit(argv[i+1][0])) summary=atoi(argv[++i]);
-    }
-    else if (opt=="-test") dotest=true;
-    else if (opt=="-threads" && i<argc-1) {
-      threads=atoi(argv[++i]);
-      if (threads<1) threads=1;
-    }
-    else if (opt=="-to") {  // read tofiles
-      while (++i<argc && argv[i][0]!='-')
-        tofiles.push_back(argv[i]);
-      if (tofiles.size()==0) tofiles.push_back("");
-      --i;
-    }
-    else if (opt=="-until" && i+1<argc) {  // read date
 
-      // Read digits from multiple args and fill in leading zeros
-      version=0;
-      int digits=0;
-      if (argv[i+1][0]=='-') {  // negative version
-        version=atol(argv[i+1]);
-        if (version>-1) usage();
-        ++i;
-      }
-      else {  // positive version or date
-        while (++i<argc && argv[i][0]!='-') {
-          for (int j=0; ; ++j) {
-            if (isdigit(argv[i][j])) {
-              version=version*10+argv[i][j]-'0';
-              ++digits;
-            }
-            else {
-              if (digits==1) version=version/10*100+version%10;
-              digits=0;
-              if (argv[i][j]==0) break;
-            }
-          }
-        }
-        --i;
-      }
 
-      // Append default time
-      if (version>=19000000LL     && version<=29991231LL)
-        version=version*100+23;
-      if (version>=1900000000LL   && version<=2999123123LL)
-        version=version*100+59;
-      if (version>=190000000000LL && version<=299912312359LL)
-        version=version*100+59;
-      if (version>9999999) {
-        if (version<19000101000000LL || version>29991231235959LL) {
-          fflush(stdout);
-          fprintf(stderr,
-            "Version date %1.0f must be 19000101000000 to 29991231235959\n",
-             double(version));
-          exit(1);
-        }
-        date=version;
-      }
-    }
-    else
-      usage();
+
+
+void Jidac::prepare( Command cmd ) {
+  if (command!=CMD_NONE) {
+    error("Cannot run this command - logic error"); // must start uninitialised...
   }
+
+  command = cmd;
 
   // Set threads
   if (threads<1) threads=numberOfProcessors();
 
   // Test date
-  if (now==-1 || date<19000000000000LL || date>30000000000000LL)
-    error("date is incorrect, use -until YYYY-MM-DD HH:MM:SS to set");
+  if (date<19000000000000LL || date>30000000000000LL)
+    error("date is invalid");
 
   // Adjust negative version
   if (version<0) {
@@ -1809,15 +1767,141 @@ int Jidac::doCommand(int argc, const char** argv) {
       jidac.read_archive(0, subpart(archive, 0).c_str());  // try remote index
     version+=size(jidac.ver)-1;
   }
+}
+
+
+
+// Parse the command line and execute. Return 1 if error else 0.
+int doCommand(Jidac & jidac, int argc, const char** argv) {
+  Jidac::Command command = Jidac::CMD_NONE;
+
+  // check date and give nice error message
+  if (jidac.date<19000000000000LL || jidac.date>30000000000000LL)
+    error("date is incorrect, use -until YYYY-MM-DD HH:MM:SS to set");
+
+  // Get optional options
+  for (int i=1; i<argc; ++i) {
+    const string opt=expandOption(argv[i]);  // read command
+    if ((opt=="-add" || opt=="-extract" || opt=="-list")
+        && i<argc-1 && argv[i+1][0]!='-' && command==Jidac::CMD_NONE) {
+
+      if (opt == "-add") command = Jidac::CMD_Add;
+      else if (opt == "-list") command = Jidac::CMD_List;
+      else if (opt == "-extract") command = Jidac::CMD_Extract;
+
+      jidac.archive=argv[++i];  // append ".zpaq" to archive if no extension
+      const char* slash=strrchr(argv[i], '/');
+      const char* dot=strrchr(slash ? slash : argv[i], '.');
+      if (!dot && jidac.archive!="") jidac.archive+=".zpaq";
+      while (++i<argc && argv[i][0]!='-')  // read filename args
+        jidac.files.push_back(argv[i]);
+      --i;
+    }
+    else if (opt=="-all") {
+      jidac.all=4;
+      if (i<argc-1 && isdigit(argv[i+1][0])) jidac.all=atoi(argv[++i]);
+    }
+    else if (opt=="-detailed") jidac.summary=-1;
+    else if (opt=="-force") jidac.force=true;
+    else if (opt=="-fragment" && i<argc-1) jidac.fragment=atoi(argv[++i]);
+    else if (opt=="-key") {
+      char hash[32];
+      if (read_password(hash, 2-exists(jidac.archive, 1),
+          argc, argv, i))
+        jidac.set_password_hash(hash);
+    }
+    else if (opt=="-method" && i<argc-1) jidac.method=argv[++i];
+    else if (opt=="-noattributes") jidac.noattributes=true;
+    else if (opt=="-nodelete") jidac.nodelete=true;
+    else if (opt=="-not") {  // read notfiles
+      while (++i<argc && argv[i][0]!='-') {
+        if (argv[i][0]=='=') jidac.nottype=argv[i];
+        else jidac.notfiles.push_back(argv[i]);
+      }
+      --i;
+    }
+    else if (opt=="-only") {  // read onlyfiles
+      while (++i<argc && argv[i][0]!='-')
+        jidac.onlyfiles.push_back(argv[i]);
+      --i;
+    }
+    else if (opt=="-summary") {
+      jidac.summary=20;
+      if (i<argc-1 && isdigit(argv[i+1][0])) jidac.summary=atoi(argv[++i]);
+    }
+    else if (opt=="-test") jidac.dotest=true;
+    else if (opt=="-threads" && i<argc-1) {
+      jidac.threads=atoi(argv[++i]);
+      if (jidac.threads<1) jidac.threads=1;
+    }
+    else if (opt=="-to") {  // read tofiles
+      while (++i<argc && argv[i][0]!='-')
+        jidac.tofiles.push_back(argv[i]);
+      if (jidac.tofiles.size()==0) jidac.tofiles.push_back("");
+      --i;
+    }
+    else if (opt=="-until" && i+1<argc) {  // read date
+
+      // Read digits from multiple args and fill in leading zeros
+      jidac.version=0;
+      int digits=0;
+      if (argv[i+1][0]=='-') {  // negative version
+        jidac.version=atol(argv[i+1]);
+        if (jidac.version>-1) usage(jidac);
+        ++i;
+      }
+      else {  // positive version or date
+        while (++i<argc && argv[i][0]!='-') {
+          for (int j=0; ; ++j) {
+            if (isdigit(argv[i][j])) {
+              jidac.version=jidac.version*10+argv[i][j]-'0';
+              ++digits;
+            }
+            else {
+              if (digits==1) jidac.version=jidac.version/10*100+jidac.version%10;
+              digits=0;
+              if (argv[i][j]==0) break;
+            }
+          }
+        }
+        --i;
+      }
+
+      // Append default time
+      if (jidac.version>=19000000LL     && jidac.version<=29991231LL)
+        jidac.version=jidac.version*100+23;
+      if (jidac.version>=1900000000LL   && jidac.version<=2999123123LL)
+        jidac.version=jidac.version*100+59;
+      if (jidac.version>=190000000000LL && jidac.version<=299912312359LL)
+        jidac.version=jidac.version*100+59;
+      if (jidac.version>9999999) {
+        if (jidac.version<19000101000000LL || jidac.version>29991231235959LL) {
+          fflush(stdout);
+          fprintf(stderr,
+            "Version date %1.0f must be 19000101000000 to 29991231235959\n",
+             double(jidac.version));
+          exit(1);
+        }
+        jidac.date=jidac.version;
+      }
+    }
+    else
+      usage(jidac);
+  }
+
+
+  jidac.prepare(command);
 
   // Execute command
   printf("zpaq v" ZPAQ_VERSION " journaling archiver, compiled "
          __DATE__ "\n");
-  if (command=="-add" && files.size()>0) return add();
-  else if (command=="-extract") return extract();
-  else if (command=="-list") return list();
-  else usage();
-  return 0;
+  switch (command) {
+    case Jidac::CMD_Add: return jidac.add();
+    case Jidac::CMD_List: return jidac.list();
+    case Jidac::CMD_Extract: return jidac.extract();
+    default: usage(jidac); // this will exit(1)
+  }
+  return 0; // not actually required
 }
 
 /////////////////////////// read_archive //////////////////////////////
@@ -1825,6 +1909,7 @@ int Jidac::doCommand(int argc, const char** argv) {
 // Read arc (default: archive) up to -date into ht, dt, ver. Return place to
 // append. If errors is not NULL then set it to number of errors found.
 int64_t Jidac::read_archive(int *errors, const char* arc) {
+  assert(command==CMD_Add || command==CMD_Extract || command==CMD_List); // sanity check
   if (errors) *errors=0;
   dcsize=dhsize=0;
   assert(size(ver)==1);
@@ -1835,7 +1920,7 @@ int64_t Jidac::read_archive(int *errors, const char* arc) {
   if (!arc || !*arc) return 0;
   Archive in;
   if (!in.open(arc, password)) {
-    if (command!="-add") {
+    if (command!=CMD_Add) {
       fflush(stdout);
       printUTF8(arc, stderr);
       fprintf(stderr, " not found.\n");
@@ -1866,7 +1951,7 @@ int64_t Jidac::read_archive(int *errors, const char* arc) {
   bool found_data=false;   // exit if nothing found
   bool first=true;         // first segment in archive?
   StringBuffer os(32832);  // decompressed block
-  const bool renamed=command=="-list" || command=="-add";
+  const bool renamed=command==CMD_List || command==CMD_Add;
 
   // Detect archive format and read the filenames, fragment sizes,
   // and hashes. In JIDAC format, these are in the index blocks, allowing
@@ -2589,6 +2674,11 @@ struct WriterPair: public libzpaq::Writer {
 
 // Add or delete files from archive. Return 1 if error else 0.
 int Jidac::add() {
+  if (command!=CMD_Add) {
+    error("Logic error - not prepared correctly");
+  }
+
+  if (files.size()==0) return 0;  // NOOP
 
   // Read archive (preferred) or index into ht, dt, ver.
   int errors=0;
@@ -3514,6 +3604,10 @@ ThreadReturn decompressThread(void* arg) {
 // existing files and set the dates and attributes of exising directories.
 // Otherwise create only new files and directories. Return 1 if error else 0.
 int Jidac::extract() {
+  if (command!=CMD_Extract) {
+    error("Logic error - not prepared correctly");
+  }
+
   if (!read_archive()) error("archive not found");
 
   // test blocks
@@ -3671,7 +3765,10 @@ bool compareName(DTMap::const_iterator p, DTMap::const_iterator q) {
 }
 
 // List contents
-int Jidac::list() {
+int Jidac::list( vector<DTMap::iterator> * out_filelist ) {
+  if (command!=CMD_List) {
+    error("Logic error - not prepared correctly");
+  }
 
   // Read archive into dt, which may be "" for empty.
   int64_t csize=0;
@@ -3703,7 +3800,11 @@ int Jidac::list() {
   // Make list of files to list. List each external file preceded
   // by the matching internal file, if any. Then list any unmatched
   // internal files at the end.
-  vector<DTMap::iterator> filelist;
+
+  // maybe the caller wants the output stored in out_filelist
+  vector<DTMap::iterator> internal_filelist;
+  vector<DTMap::iterator> & filelist = (out_filelist ? *out_filelist : internal_filelist);
+
   for (DTMap::iterator p=edt.begin(); p!=edt.end(); ++p) {
     DTMap::iterator a=dt.find(rename(p->first));
     if (a!=dt.end() && (all || a->second.date)) {
@@ -3844,6 +3945,9 @@ int Jidac::list() {
 
 /////////////////////////////// main //////////////////////////////////
 
+#define FOR_CMD 0
+
+#if FOR_CMD
 // Convert argv to UTF-8 and replace \ with /
 #ifdef unix
 int main(int argc, const char** argv) {
@@ -3868,7 +3972,7 @@ int main() {
   int errorcode=0;
   try {
     Jidac jidac;
-    errorcode=jidac.doCommand(argc, argv);
+    errorcode=doCommand(jidac, argc, argv);
   }
   catch (std::exception& e) {
     fflush(stdout);
@@ -3880,3 +3984,38 @@ int main() {
       errorcode ? "(with errors)" : "(all OK)");
   return errorcode;
 }
+
+#else
+
+// my own basic command line example
+int main(int argc, const char** argv) {
+  global_start=mtime();  // get start time -- GLOBAL VARIABLE
+  int errorcode=0;
+  try {
+    Jidac jidac;
+
+    jidac.archive = argv[1];
+    // could do: jidac.force = true;
+    jidac.set_password_plain(argv[2]);
+    // could do: jidac.notfiles.push_back("filesnotwanted");
+    jidac.nottype = "=^"; // for the list-equal setting
+    // could do: jidac.onlyfiles.push_back("whatever");
+    printf("Archive: %s  Key: %s\n", argv[1], argv[2]);
+
+    // jidac.prepare( Jidac::CMD_Extract );
+    // jidac.extract();
+
+    vector<DTMap::iterator> filelist;
+    jidac.prepare( Jidac::CMD_List );
+    jidac.list(&filelist);
+    printf("LIST RETURNED %f\n", 1.0*filelist.size());
+    // TODO print DTMap
+  }
+  catch (std::exception& e) {
+    fflush(stdout);
+    fprintf(stderr, "zpaq exiting from main: %s\n", e.what());
+    errorcode=1;
+  }
+  return errorcode;
+}
+#endif
